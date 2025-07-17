@@ -52,6 +52,14 @@ public protocol Endpoint {
     var timeoutInterval: TimeInterval { get }
     /// Request cache policy. Default is *.reloadIgnoringLocalAndRemoteCacheData*
     var cachePolicy: URLRequest.CachePolicy { get }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse)
+}
+
+extension Endpoint {
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await URLSession.shared.data(for: request)
+    }
 }
 
 // MARK: Private methods
@@ -103,10 +111,12 @@ public extension Endpoint {
     func send<T: Response>() -> AnyPublisher<T, SwiftApiClientError> {
         do {
             let request = try buildURLRequest()
-            return URLSession.shared.dataTaskPublisher(for: request)
-                .tryMapResponse(T.self, responseValidator: responseValidation)
-                .mapErrorsToApiClientError()
-                .eraseToAnyPublisher()
+            return TaskPublisher {
+                try await data(for: request)
+            }
+            .tryMapResponse(T.self, responseValidator: responseValidation)
+            .mapErrorsToApiClientError()
+            .eraseToAnyPublisher()
         } catch let error as SwiftApiClientError {
             return Fail<T, SwiftApiClientError>(error: error).eraseToAnyPublisher()
         } catch {
@@ -119,10 +129,12 @@ public extension Endpoint {
     func send() -> AnyPublisher<Void, SwiftApiClientError> {
         do {
             let request = try buildURLRequest()
-            return URLSession.shared.dataTaskPublisher(for: request)
-                .validateResponse(responseValidation)
-                .mapErrorsToApiClientError()
-                .eraseToAnyPublisher()
+            return TaskPublisher {
+                try await data(for: request)
+            }
+            .validateResponse(responseValidation)
+            .mapErrorsToApiClientError()
+            .eraseToAnyPublisher()
         } catch let error as SwiftApiClientError {
             return Fail<Void, SwiftApiClientError>(error: error).eraseToAnyPublisher()
         } catch {
@@ -148,14 +160,14 @@ public extension Endpoint {
     /// Send request using *async* and only validate the response without decoding it to an object
     func send() async throws {
         let request = try buildURLRequest()
-        let serverResponse = try await URLSession.shared.data(for: request)
+        let serverResponse = try await data(for: request)
         try responseValidation.validate(serverResponse)
     }
 
     /// Send request using *async* and only validate the response without decoding it to an object
     func asyncSend() async throws {
         let request = try buildURLRequest()
-        let serverResponse = try await URLSession.shared.data(for: request)
+        let serverResponse = try await data(for: request)
         try responseValidation.validate(serverResponse)
     }
 
@@ -163,22 +175,24 @@ public extension Endpoint {
     /// - Returns: Generic type conforming to *Response* protocol
     func asyncSend<T: Response>()  async throws -> T {
         let request = try buildURLRequest()
-        let serverResponse = try await URLSession.shared.data(for: request)
+        let serverResponse = try await data(for: request)
         try responseValidation.validate(serverResponse)
         return try T.parse(data: serverResponse.0)
     }
 }
 
+private typealias DataTaskPublisher = TaskPublisher<(data: Data, response: URLResponse), Error>
+
 // MARK: Private definitions
-private extension URLSession.DataTaskPublisher {
-    func tryMapResponse<T: Response>(_ decodable: T.Type, responseValidator: ResponseValidator) -> Publishers.TryMap<Self, T> {
+private extension DataTaskPublisher {
+    func tryMapResponse<T: Response>(_ decodable: T.Type, responseValidator: ResponseValidator) -> Publishers.TryMap<DataTaskPublisher, T> {
         self.tryMap {
             try responseValidator.validate($0)
             return try T.parse(data: $0.data)
         }
     }
 
-    func validateResponse(_ responseValidator: ResponseValidator) -> Publishers.TryMap<Self, Void> {
+    func validateResponse(_ responseValidator: ResponseValidator) -> Publishers.TryMap<DataTaskPublisher, Void> {
         self.tryMap {
             try responseValidator.validate($0)
             return ()
